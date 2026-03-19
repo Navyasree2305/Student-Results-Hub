@@ -1,0 +1,187 @@
+@startuml SPMVV_Data_Models
+
+skinparam classBackgroundColor #E8F4FD
+skinparam classBorderColor #2196F3
+skinparam classHeaderBackgroundColor #2196F3
+skinparam classHeaderFontColor #FFFFFF
+skinparam classFontSize 11
+skinparam ArrowColor #555555
+
+title SPMVV Exam Results - Django Data Models
+
+class User {
+  +id: int
+  +username: str
+  +role: ROLE_CHOICES
+  +roll_number: str [unique]
+  +branch: str
+  +department: str
+  +can_view_statistics: bool
+  +can_upload_results: bool
+  +can_delete_results: bool
+  +can_manage_users: bool
+  +can_view_all_branches: bool
+  +is_active_user: bool
+  +failed_login_attempts: int
+  +locked_until: datetime
+}
+
+class Result {
+  +id: int
+  +roll_number: str
+  +student_name: str
+  +year: int
+  +semester: int
+  +exam_name: str
+  +exam_held_date: date
+  +result_type: RESULT_TYPE_CHOICES
+  +course: COURSE_CHOICES
+  +branch: BRANCH_CHOICES
+  +overall_result: str
+  +overall_grade: str
+  +total_marks: int
+  +sgpa: decimal
+  +completion_date: date
+  +uploaded_at: datetime
+  +updated_at: datetime
+}
+
+class Subject {
+  +id: int
+  +subject_code: str
+  +subject_name: str
+  +subject_type: str
+  +credits: int
+  +internal_marks: int
+  +external_marks: int
+  +total_marks: int
+  +grade: str
+  +attempts: int
+}
+
+class Notification {
+  +id: int
+  +message: str
+  +exam_name: str
+  +results_published_date: date
+  +is_read: bool
+  +created_at: datetime
+}
+
+class Circular {
+  +id: int
+  +title: str
+  +category: CATEGORY_CHOICES
+  +description: str
+  +attachment: FileField
+  +attachment_name: str
+  +is_active: bool
+  +target_year: int
+  +target_branch: str
+  +created_at: datetime
+  +updated_at: datetime
+  +is_pdf(): bool
+  +is_image(): bool
+}
+
+class AuditLog {
+  +id: int
+  +action: ACTION_CHOICES
+  +details: str
+  +ip_address: str
+  +timestamp: datetime
+}
+
+class LoginAttempt {
+  +id: int
+  +username: str
+  +ip_address: str
+  +timestamp: datetime
+  +success: bool
+}
+
+class BlacklistedToken {
+  +id: int
+  +token: str
+  +blacklisted_at: datetime
+}
+
+class Exam {
+  +id: int
+  +exam_name: str
+  +year: str
+  +semester: str
+  +course: str
+  +branch: str
+  +exam_center: str
+  +exam_start_time: time
+  +exam_end_time: time
+  +instructions: str
+  +is_active: bool
+  +created_at: datetime
+  +updated_at: datetime
+}
+
+class ExamSubject {
+  +id: int
+  +subject_code: str
+  +subject_name: str
+  +subject_type: str
+  +exam_date: date
+  +exam_time: time
+  +duration: str
+  +order: int
+}
+
+class ExamEnrollment {
+  +id: int
+  +roll_number: str
+  +student_name: str
+  +branch: str
+  +enrolled_at: datetime
+}
+
+class StudentPhoto {
+  +roll_number: str [PK]
+  +photo: ImageField
+  +consent_given: bool
+  +consent_text: str
+  +consent_date: datetime
+  +uploaded_at: datetime
+  +updated_at: datetime
+}
+
+class HallTicket {
+  +id: int
+  +hall_ticket_number: str [unique]
+  +qr_code_data: str
+  +status: str
+  +download_count: int
+  +generated_at: datetime
+  +downloaded_at: datetime
+  +pdf_file: FileField
+}
+
+' Relationships
+User 1 -- 0..* Result : uploaded_by >
+User 1 -- 0..* Result : student <
+User 1 -- 0..* Notification : student <
+User 1 -- 0..* AuditLog : user <
+User 1 -- 0..* BlacklistedToken : user <
+User 1 -- 0..* Circular : created_by >
+User 1 -- 0..* Exam : created_by >
+User 1 -- 0..* ExamEnrollment : student <
+User 1 -- 0..* HallTicket : student <
+User 1 -- 0..* HallTicket : generated_by >
+User 1 -- 0..1 StudentPhoto : student <
+
+Result 1 *-- 0..* Subject : subjects
+Result 1 -- 0..* Notification : result <
+
+Exam 1 *-- 0..* ExamSubject : subjects
+Exam 1 *-- 0..* ExamEnrollment : enrollments
+Exam 1 -- 0..* HallTicket : exam <
+
+ExamEnrollment 1 -- 0..1 HallTicket : enrollment <
+
+@enduml

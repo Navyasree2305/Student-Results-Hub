@@ -1,0 +1,44 @@
+# Core Django Framework
+Django==5.0.9
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.3.1
+
+# CORS handling
+django-cors-headers==4.4.0
+
+# Database drivers
+mysqlclient==2.2.4
+
+# Excel file handling
+openpyxl==3.1.5
+
+# Environment variable management
+python-dotenv==1.0.1
+
+# Password hashing
+argon2-cffi==23.1.0
+
+# Rate limiting
+django-ratelimit==4.1.0
+
+# Static file serving
+whitenoise==6.7.0
+
+# WSGI HTTP Server
+gunicorn==22.0.0
+
+# Additional dependencies for production
+PyJWT==2.8.0
+cryptography==42.0.5
+pytz==2024.1
+
+# For RedHat/CentOS compatibility
+setuptools>=65.0.0
+wheel>=0.40.0
+pip>=23.0.0
+
+# PDF Generation for Hall Tickets
+reportlab==4.1.0
+Pillow==10.2.0
+qrcode==7.4.2
+pandas==2.1.4
