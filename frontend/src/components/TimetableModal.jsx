@@ -1,0 +1,915 @@
+import React, { useState, useCallback, useEffect } from 'react';
+import {
+  FaTimes, FaTable, FaUpload, FaDownload, FaFileExcel,
+  FaFilePdf, FaCheckCircle, FaExclamationTriangle, FaCog,
+  FaRobot, FaInfoCircle, FaChevronRight, FaChevronLeft,
+  FaPlus, FaTrash, FaChevronDown, FaChevronUp, FaUserTie,
+} from 'react-icons/fa';
+import api from '../services/api';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const DAYS = ['1', '2', '3', '4', '5', '6'];
+
+const DEFAULT_CONFIG = {
+  college_name: 'Sri Padmavati Mahila Visvavidyalayam',
+  working_days: '6',
+  start_time: '09:00',
+  period_minutes: '50',
+  periods_per_day: '7',
+  lunch_after_period: '3',
+  lunch_minutes: '40',
+  lab_consecutive_periods: '3',
+  min_faculty_gap: '1',
+};
+
+const DEFAULT_CONSTRAINTS = {
+  no_first_period: "",
+  no_last_period: "",
+  avoid_days: "",
+  preferred_days: "",
+  locked_slots: [],
+  additional_instructions: "",
+};
+
+// Default short_breaks lives outside config to avoid mixing with solver fields
+const DEFAULT_SHORT_BREAKS = [];  // [{after_period: "2", duration: "10"}, ...]
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function calcPeriodTimes(config, shortBreaks = []) {
+  const { start_time, period_minutes, periods_per_day,
+          lunch_after_period, lunch_minutes } = config;
+  if (!start_time || !period_minutes || !periods_per_day) return [];
+
+  const [sh, sm] = start_time.split(':').map(Number);
+  let mins = sh * 60 + sm;
+  const pMins = parseInt(period_minutes, 10) || 50;
+  // lunch_after_period is 1-based (e.g. 4 means after the 4th period)
+  const lunchAfter1 = parseInt(lunch_after_period, 10);  // 1-based
+  const lunchMins = parseInt(lunch_minutes, 10) || 40;
+  const totalPeriods = parseInt(periods_per_day, 10) || 7;
+
+  // Build a map: period_number (1-based) → break duration
+  const breakMap = {};
+  for (const b of shortBreaks) {
+    const ap = parseInt(b.after_period, 10);
+    const dur = parseInt(b.duration, 10) || 10;
+    if (!isNaN(ap) && ap > 0) breakMap[ap] = dur;
+  }
+
+  const slots = [];
+
+  for (let p = 1; p <= totalPeriods; p++) {
+    const sh2 = Math.floor(mins / 60), sm2 = mins % 60;
+    const endMins = mins + pMins;
+    const eh = Math.floor(endMins / 60), em = endMins % 60;
+    slots.push({ label: `Period ${p}`, time: `${pad2(sh2)}:${pad2(sm2)} – ${pad2(eh)}:${pad2(em)}`, isBreak: false });
+    mins += pMins;
+
+    // Short break after this period?
+    if (breakMap[p] !== undefined) {
+      const bDur = breakMap[p];
+      const bh = Math.floor(mins / 60), bm = mins % 60;
+      const beh = Math.floor((mins + bDur) / 60), bem = (mins + bDur) % 60;
+      slots.push({ label: 'SHORT BREAK', time: `${pad2(bh)}:${pad2(bm)} – ${pad2(beh)}:${pad2(bem)}`, isBreak: true });
+      mins += bDur;
+    }
+
+    // Lunch after this period?
+    if (!isNaN(lunchAfter1) && p === lunchAfter1) {
+      const lh = Math.floor(mins / 60), lm = mins % 60;
+      const leh = Math.floor((mins + lunchMins) / 60), lem = (mins + lunchMins) % 60;
+      slots.push({ label: 'LUNCH', time: `${pad2(lh)}:${pad2(lm)} – ${pad2(leh)}:${pad2(lem)}`, isBreak: true });
+      mins += lunchMins;
+    }
+  }
+  return slots;
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function FieldLabel({ children, required }) {
+  return (
+    <label className="block text-xs font-semibold text-gray-600 mb-1">
+      {children}{required && <span className="text-red-500 ml-0.5">*</span>}
+    </label>
+  );
+}
+
+function SelectField({ label, name, value, onChange, options, required }) {
+  return (
+    <div>
+      <FieldLabel required={required}>{label}</FieldLabel>
+      <select
+        name={name} value={value} onChange={onChange}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                   focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white"
+      >
+        <option value="">Select…</option>
+        {options.map(o => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function InputField({ label, name, value, onChange, type = 'text',
+                      placeholder, min, max, required, hint }) {
+  return (
+    <div>
+      <FieldLabel required={required}>{label}</FieldLabel>
+      <input
+        type={type} name={name} value={value} onChange={onChange}
+        placeholder={placeholder} min={min} max={max}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                   focus:outline-none focus:ring-2 focus:ring-blue-400"
+      />
+      {hint && <p className="text-xs text-gray-400 mt-0.5">{hint}</p>}
+    </div>
+  );
+}
+
+function PeriodPreview({ config, shortBreaks }) {
+  const slots = calcPeriodTimes(config, shortBreaks || []);
+  if (!slots.length) return null;
+  return (
+    <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3">
+      <p className="text-xs font-semibold text-blue-700 mb-2 flex items-center gap-1">
+        <FaInfoCircle /> Period Schedule Preview
+      </p>
+      <div className="grid grid-cols-2 gap-1 max-h-36 overflow-y-auto">
+        {slots.map((s, i) => (
+          <div key={i}
+            className={`text-xs px-2 py-1 rounded flex justify-between gap-2
+              ${s.isBreak
+                ? 'bg-amber-100 text-amber-700 font-semibold'
+                : 'bg-white text-gray-700 border border-gray-200'}`}
+          >
+            <span>{s.label}</span>
+            <span className="font-mono">{s.time}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+export default function TimetableModal({ isOpen, onClose }) {
+  const [step, setStep] = useState(1);
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [shortBreaks, setShortBreaks] = useState(DEFAULT_SHORT_BREAKS);
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  const [downloadFormat, setDownloadFormat] = useState('pdf');
+  const [downloadSection, setDownloadSection] = useState('');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [constraints, setConstraints] = useState(DEFAULT_CONSTRAINTS);
+  const [showConstraints, setShowConstraints] = useState(false);
+  const [downloadFaculty, setDownloadFaculty] = useState('');
+  const [downloadingFaculty, setDownloadingFaculty] = useState(false);
+  const [downloadingFacultyAll, setDownloadingFacultyAll] = useState(false);
+
+  useEffect(() => {
+    const h = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (result?.sections?.length) setDownloadSection(result.sections[0]);
+    if (result?.faculty_list?.length) setDownloadFaculty(result.faculty_list[0]);
+  }, [result]);
+
+  const handleConfigChange = useCallback((e) => {
+    const { name, value } = e.target;
+    setConfig(prev => ({ ...prev, [name]: value }));
+    setError('');
+  }, []);
+
+  const validateConfig = () => {
+    const required = [
+      'college_name', 'working_days', 'start_time', 'period_minutes',
+      'periods_per_day', 'lunch_after_period', 'lunch_minutes',
+      'lab_consecutive_periods',
+    ];
+    for (const k of required) {
+      if (!config[k] && config[k] !== 0) return `Please fill in: ${k.replace(/_/g, ' ')}`;
+    }
+    return '';
+  };
+
+  const goToStep2 = () => {
+    const err = validateConfig();
+    if (err) { setError(err); return; }
+    setError('');
+    setStep(2);
+  };
+
+  const handleConstraintChange = useCallback((e) => {
+    const { name, value } = e.target;
+    setConstraints(prev => ({ ...prev, [name]: value }));
+  }, []);
+
+  const addLockedSlot = () =>
+    setConstraints(prev => ({
+      ...prev,
+      locked_slots: [...prev.locked_slots, { section: "", day: "0", period: "0", subject_code: "" }],
+    }));
+
+  const updateLockedSlot = (idx, field, value) =>
+    setConstraints(prev => ({
+      ...prev,
+      locked_slots: prev.locked_slots.map((s, i) => i === idx ? { ...s, [field]: value } : s),
+    }));
+
+  const removeLockedSlot = (idx) =>
+    setConstraints(prev => ({ ...prev, locked_slots: prev.locked_slots.filter((_, i) => i !== idx) }));
+
+  const buildConstraintsPayload = () => {
+    const parseFacultyList = (str) =>
+      str.split(",").map(s => s.trim()).filter(Boolean);
+    const parseFacultyDays = (str) => {
+      const out = {};
+      str.split("\n").forEach(line => {
+        const colon = line.indexOf(":");
+        if (colon < 0) return;
+        const fac  = line.slice(0, colon).trim();
+        const days = line.slice(colon + 1).split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+        if (fac && days.length) out[fac] = days;
+      });
+      return out;
+    };
+    return {
+      no_first_period: parseFacultyList(constraints.no_first_period),
+      no_last_period:  parseFacultyList(constraints.no_last_period),
+      avoid_days:      parseFacultyDays(constraints.avoid_days),
+      preferred_days:  parseFacultyDays(constraints.preferred_days),
+      locked_slots:    constraints.locked_slots
+        .filter(s => s.section && s.subject_code)
+        .map(s => ({ ...s, day: parseInt(s.day, 10), period: parseInt(s.period, 10) })),
+      additional_instructions: constraints.additional_instructions.trim(),
+    };
+  };
+
+  const handleGenerate = async (e) => {
+    e.preventDefault();
+    if (!file) { setError('Please upload an Excel subject file.'); return; }
+
+    setLoading(true);
+    setError('');
+    setResult(null);
+
+    const form = new FormData();
+    Object.entries(config).forEach(([k, v]) => {
+      form.append(k, v);
+    });
+    // short_breaks: array of {after_period, duration} — values are already 1-based (no offset)
+    form.append("short_breaks", JSON.stringify(
+      shortBreaks
+        .filter(b => b.after_period !== '' && !isNaN(parseInt(b.after_period, 10)))
+        .map(b => ({ after_period: parseInt(b.after_period, 10), duration: parseInt(b.duration, 10) || 10 }))
+    ));
+    form.append("custom_constraints", JSON.stringify(buildConstraintsPayload()));
+    form.append("file", file);
+
+    try {
+      const resp = await api.post('/timetable/generate/', form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setResult(resp.data);
+    } catch (err) {
+      const data = err?.response?.data;
+      const msg = data?.error || data?.detail || err?.message || 'Generation failed.';
+      const aiExp = data?.ai_explanation;
+      setError(msg + (aiExp ? `\n\nAI Suggestion: ${aiExp}` : ''));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!result) return;
+    setDownloading(true);
+    try {
+      const resp = await api.post(
+        '/timetable/download/',
+        {
+          format:      downloadFormat,
+          section:     downloadFormat === 'pdf' ? downloadSection : undefined,
+          solution:    result.solution,
+          config:      result.config,
+          groups:      result.groups,
+          college_name: result.college_name,
+        },
+        { responseType: 'blob' }
+      );
+      const ext = downloadFormat === 'pdf' ? 'pdf' : 'xlsx';
+      const secPart = downloadFormat === 'pdf' ? `_Sec${downloadSection}` : '';
+      const g0 = result.groups?.[0];
+      const tag = g0 ? `${g0.branch}_Y${g0.year}S${g0.semester}` : 'timetable';
+      const fname = `timetable_${tag}${secPart}.${ext}`;
+      const url = URL.createObjectURL(new Blob([resp.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = fname; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Download failed: ' + (err?.message || 'Unknown error'));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  // ── Download All Sections ──
+  const handleDownloadAll = async () => {
+    if (!result) return;
+    setDownloadingAll(true);
+    try {
+      const resp = await api.post(
+        '/timetable/download-all/',
+        {
+          solution:     result.solution,
+          config:       result.config,
+          groups:       result.groups,
+          college_name: result.college_name,
+        },
+        { responseType: 'blob' }
+      );
+      const url = URL.createObjectURL(new Blob([resp.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = 'timetable_all_sections.pdf'; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Download failed: ' + (err?.message || 'Unknown error'));
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
+
+  const handleDownloadFaculty = async () => {
+    if (!result || !downloadFaculty) return;
+    setDownloadingFaculty(true);
+    try {
+      const resp = await api.post(
+        '/timetable/download-faculty/',
+        {
+          faculty_name:     downloadFaculty,
+          faculty_solution: result.faculty_solution,
+          config:           result.config,
+          college_name:     result.college_name,
+        },
+        { responseType: 'blob' }
+      );
+      const safeName = downloadFaculty.replace(/[^a-zA-Z0-9]/g, '_');
+      const url = URL.createObjectURL(new Blob([resp.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = `timetable_faculty_${safeName}.pdf`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Faculty download failed: ' + (err?.message || 'Unknown error'));
+    } finally {
+      setDownloadingFaculty(false);
+    }
+  };
+
+  const handleDownloadFacultyAll = async () => {
+    if (!result) return;
+    setDownloadingFacultyAll(true);
+    try {
+      const resp = await api.post(
+        '/timetable/download-faculty-all/',
+        {
+          faculty_solution: result.faculty_solution,
+          config:           result.config,
+          college_name:     result.college_name,
+        },
+        { responseType: 'blob' }
+      );
+      const url = URL.createObjectURL(new Blob([resp.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = 'timetable_all_faculty.pdf'; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Faculty all download failed: ' + (err?.message || 'Unknown error'));
+    } finally {
+      setDownloadingFacultyAll(false);
+    }
+  };
+
+  const handleTemplate = async () => {
+    try {
+      const resp = await api.get('/timetable/template/', { responseType: 'blob' });
+      const url = URL.createObjectURL(new Blob([resp.data]));
+      const a = document.createElement('a');
+      a.href = url; a.download = 'timetable_template.xlsx'; a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* silent */ }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl mx-4 max-h-[92vh] flex flex-col">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-blue-700 to-blue-600 rounded-t-2xl">
+          <div className="flex items-center gap-3 text-white">
+            <FaTable className="text-xl" />
+            <div>
+              <h2 className="text-lg font-semibold">Timetable Generator</h2>
+              <p className="text-xs text-blue-200">AI-assisted schedule builder using OR-Tools + Qwen 2.5</p>
+            </div>
+          </div>
+          <button onClick={onClose}
+            className="text-white/70 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors">
+            <FaTimes className="text-lg" />
+          </button>
+        </div>
+
+        {/* Step tabs */}
+        <div className="flex border-b border-gray-200 bg-gray-50 px-6">
+          {[
+            { n: 1, label: 'Configuration', icon: <FaCog /> },
+            { n: 2, label: 'Upload & Generate', icon: <FaUpload /> },
+          ].map(({ n, label, icon }) => (
+            <button key={n}
+              onClick={() => {
+                if (n === 1) setStep(1);
+                else goToStep2();
+              }}
+              className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors
+                ${step === n
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              {icon} Step {n}: {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto">
+
+          {/* ════ STEP 1: CONFIG ════ */}
+          {step === 1 && (
+            <div className="p-6 space-y-6">
+
+              {/* Institution */}
+              <section>
+                <h3 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">1</span>
+                  Institution
+                </h3>
+                <div className="grid grid-cols-1 gap-4">
+                  <div>
+                    <FieldLabel required>College Name / Header</FieldLabel>
+                    <textarea
+                      name="college_name"
+                      value={config.college_name}
+                      onChange={handleConfigChange}
+                      rows={3}
+                      placeholder={"e.g. Sri Padmavati Mahila Visvavidyalayam\nDepartment of Computer Science\nAcademic Year 2025-26"}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                                 focus:outline-none focus:ring-2 focus:ring-blue-400 resize-y"
+                    />
+                    <p className="text-xs text-gray-400 mt-0.5">Each line will appear as a separate header line on the timetable PDF.</p>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-400 mt-2 flex items-center gap-1">
+                  <FaInfoCircle className="text-blue-400" />
+                  Branch, year, semester and sections are read from the Excel file you upload in Step 2.
+                </p>
+              </section>
+
+              {/* Schedule Structure */}
+              <section>
+                <h3 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">2</span>
+                  Schedule Structure
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  <SelectField label="Working Days/Week" name="working_days" value={config.working_days}
+                    onChange={handleConfigChange} required
+                    options={DAYS.map(d => ({ value: d, label: `${d} days` }))} />
+                  <InputField label="Class Start Time" name="start_time" value={config.start_time}
+                    onChange={handleConfigChange} type="time" required />
+                  <InputField label="Period Duration (min)" name="period_minutes" value={config.period_minutes}
+                    onChange={handleConfigChange} type="number" min="20" max="120" required placeholder="50" />
+                  <InputField label="Periods Per Day" name="periods_per_day" value={config.periods_per_day}
+                    onChange={handleConfigChange} type="number" min="2" max="12" required placeholder="7" />
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+                  <InputField label="Lunch After Period #" name="lunch_after_period" value={config.lunch_after_period}
+                    onChange={handleConfigChange} type="number" min="1" required
+                    hint="e.g. 4 = lunch after the 4th period" />
+                  <InputField label="Lunch Duration (min)" name="lunch_minutes" value={config.lunch_minutes}
+                    onChange={handleConfigChange} type="number" min="10" max="120" required placeholder="40" />
+                </div>
+
+                {/* Short Breaks — multi-row */}
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <FieldLabel>Short Breaks</FieldLabel>
+                      <p className="text-xs text-gray-400 -mt-0.5">Add one row per short break. "After Period #" is 1-based (e.g. 2 = after the 2nd period).</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShortBreaks(prev => [...prev, { after_period: '', duration: '10' }])}
+                      className="flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 px-3 py-1 rounded-lg hover:bg-blue-100 transition-colors whitespace-nowrap"
+                    >
+                      <FaPlus /> Add Break
+                    </button>
+                  </div>
+                  {shortBreaks.length === 0 && (
+                    <p className="text-xs text-gray-400 italic">No short breaks configured. Click "Add Break" to add one.</p>
+                  )}
+                  <div className="space-y-2">
+                    {shortBreaks.map((b, idx) => (
+                      <div key={idx} className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                        <div className="flex-1 grid grid-cols-2 gap-3">
+                          <div>
+                            <span className="block text-xs text-gray-500 mb-0.5">After Period #</span>
+                            <input
+                              type="number" min="1" max="12"
+                              value={b.after_period}
+                              onChange={e => setShortBreaks(prev => prev.map((x, i) => i === idx ? { ...x, after_period: e.target.value } : x))}
+                              placeholder="e.g. 2"
+                              className="border border-gray-300 rounded px-2 py-1 text-sm w-full focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            />
+                          </div>
+                          <div>
+                            <span className="block text-xs text-gray-500 mb-0.5">Duration (min)</span>
+                            <input
+                              type="number" min="5" max="30"
+                              value={b.duration}
+                              onChange={e => setShortBreaks(prev => prev.map((x, i) => i === idx ? { ...x, duration: e.target.value } : x))}
+                              placeholder="10"
+                              className="border border-gray-300 rounded px-2 py-1 text-sm w-full focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            />
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShortBreaks(prev => prev.filter((_, i) => i !== idx))}
+                          className="text-red-400 hover:text-red-600 transition-colors mt-3"
+                        >
+                          <FaTrash />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <PeriodPreview config={config} shortBreaks={shortBreaks} />
+              </section>
+
+              {/* Lab & Faculty */}
+              <section>
+                <h3 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">3</span>
+                  Lab &amp; Faculty Defaults
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <InputField label="Consecutive Periods per Lab Session (default)" name="lab_consecutive_periods"
+                    value={config.lab_consecutive_periods} onChange={handleConfigChange}
+                    type="number" min="1" max="6" required placeholder="3"
+                    hint="Can be overridden per-lab in Excel" />
+                  <InputField label="Min Faculty Gap Between Classes (default)" name="min_faculty_gap"
+                    value={config.min_faculty_gap} onChange={handleConfigChange}
+                    type="number" min="0" max="4" placeholder="1"
+                    hint="0 = no gap. Can be overridden per-lab in Excel" />
+                </div>
+              </section>
+
+              {/* Custom Constraints */}
+              <section className="border border-gray-200 rounded-xl overflow-hidden">
+                <button type="button" onClick={() => setShowConstraints(v => !v)}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-bold text-gray-700">
+                  <span className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">4</span>
+                    Custom Constraints <span className="text-xs font-normal text-gray-400 ml-1">(optional)</span>
+                  </span>
+                  {showConstraints ? <FaChevronUp className="text-gray-400" /> : <FaChevronDown className="text-gray-400" />}
+                </button>
+                {showConstraints && (
+                  <div className="p-4 space-y-4 bg-white">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <FieldLabel>No First Period — Faculty Names</FieldLabel>
+                        <input type="text" name="no_first_period" value={constraints.no_first_period}
+                          onChange={handleConstraintChange} placeholder="e.g. Dr. A Kumar, Dr. B Rao"
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                        <p className="text-xs text-gray-400 mt-0.5">Comma-separated. These faculty won’t be scheduled in period 1.</p>
+                      </div>
+                      <div>
+                        <FieldLabel>No Last Period — Faculty Names</FieldLabel>
+                        <input type="text" name="no_last_period" value={constraints.no_last_period}
+                          onChange={handleConstraintChange} placeholder="e.g. Dr. C Reddy"
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+                        <p className="text-xs text-gray-400 mt-0.5">Comma-separated. These faculty won’t be scheduled in the last period.</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <FieldLabel>Avoid Days (per faculty)</FieldLabel>
+                        <textarea name="avoid_days" value={constraints.avoid_days}
+                          onChange={handleConstraintChange} rows={3}
+                          placeholder={"Dr. A Kumar: 0,4\nDr. B Rao: 2"}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono" />
+                        <p className="text-xs text-gray-400 mt-0.5">One faculty per line. Days: 0=Mon … 5=Sat.</p>
+                      </div>
+                      <div>
+                        <FieldLabel>Preferred Days (per faculty)</FieldLabel>
+                        <textarea name="preferred_days" value={constraints.preferred_days}
+                          onChange={handleConstraintChange} rows={3}
+                          placeholder={"Dr. F Nair: 0,1,2\nDr. G Menon: 3,4"}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono" />
+                        <p className="text-xs text-gray-400 mt-0.5">Faculty will only teach on these days.</p>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <FieldLabel>Locked Slots</FieldLabel>
+                        <button type="button" onClick={addLockedSlot}
+                          className="flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 px-3 py-1 rounded-lg hover:bg-blue-100 transition-colors">
+                          <FaPlus /> Add Slot
+                        </button>
+                      </div>
+                      {constraints.locked_slots.length === 0 && (
+                        <p className="text-xs text-gray-400">No locked slots. Use "Add Slot" to pin a subject to a specific day/period. Section must be the scoped key (e.g. CSE_2_1_A).</p>
+                      )}
+                      {constraints.locked_slots.map((ls, idx) => (
+                        <div key={idx} className="flex flex-wrap gap-2 items-end mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
+                          <div>
+                            <span className="block text-xs text-gray-500 mb-0.5">Section (scoped key)</span>
+                            <input type="text" value={ls.section} onChange={e => updateLockedSlot(idx,"section",e.target.value)}
+                              placeholder="CSE_2_1_A" className="border border-gray-300 rounded px-2 py-1 text-xs w-28 focus:outline-none" />
+                          </div>
+                          <div>
+                            <span className="block text-xs text-gray-500 mb-0.5">Day (0=Mon)</span>
+                            <input type="number" min="0" max="5" value={ls.day} onChange={e => updateLockedSlot(idx,"day",e.target.value)}
+                              className="border border-gray-300 rounded px-2 py-1 text-xs w-14 focus:outline-none" />
+                          </div>
+                          <div>
+                            <span className="block text-xs text-gray-500 mb-0.5">Period (0-indexed)</span>
+                            <input type="number" min="0" max="11" value={ls.period} onChange={e => updateLockedSlot(idx,"period",e.target.value)}
+                              className="border border-gray-300 rounded px-2 py-1 text-xs w-20 focus:outline-none" />
+                          </div>
+                          <div className="flex-1">
+                            <span className="block text-xs text-gray-500 mb-0.5">Subject Code</span>
+                            <input type="text" value={ls.subject_code} onChange={e => updateLockedSlot(idx,"subject_code",e.target.value)}
+                              placeholder="CS301" className="border border-gray-300 rounded px-2 py-1 text-xs w-full focus:outline-none" />
+                          </div>
+                          <button type="button" onClick={() => removeLockedSlot(idx)}
+                            className="text-red-400 hover:text-red-600 transition-colors pb-1">
+                            <FaTrash />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Additional Instructions / Metadata */}
+                    <div>
+                      <FieldLabel>Additional Instructions</FieldLabel>
+                      <textarea
+                        name="additional_instructions"
+                        value={constraints.additional_instructions}
+                        onChange={handleConstraintChange}
+                        rows={4}
+                        placeholder={"e.g. Do not schedule Dr. A Kumar on Friday afternoons.\nAll lab sessions should be in the first half of the day.\nSection A should have English on Monday mornings."}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-y"
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        Free-text instructions sent to the AI. These are used to guide the AI summary and explanation — write any scheduling preferences or special rules here.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {error && (
+                <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg">
+                  <FaExclamationTriangle className="mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end">
+                <button onClick={goToStep2}
+                  className="flex items-center gap-2 bg-blue-600 text-white px-6 py-2.5 rounded-lg
+                             hover:bg-blue-700 transition-colors font-medium">
+                  Next: Upload Subjects <FaChevronRight />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ════ STEP 2: UPLOAD + RESULT ════ */}
+          {step === 2 && (
+            <div className="p-6 space-y-5">
+
+              {/* Back + file upload row */}
+              <div className="flex items-start gap-4 flex-wrap">
+                <button onClick={() => setStep(1)}
+                  className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mt-1">
+                  <FaChevronLeft /> Back to Config
+                </button>
+
+                <div className="flex-1 min-w-64">
+                  <FieldLabel required>Subject Excel File</FieldLabel>
+                  <div className="flex gap-2">
+                    <input type="file" accept=".xlsx,.xls"
+                      onChange={(e) => { setFile(e.target.files[0]); setError(''); }}
+                      className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2
+                                 file:mr-3 file:py-1 file:px-3 file:border-0 file:text-xs
+                                 file:font-medium file:bg-blue-50 file:text-blue-700
+                                 hover:file:bg-blue-100 cursor-pointer" />
+                    <button type="button" onClick={handleTemplate}
+                      className="flex items-center gap-1.5 text-xs border border-green-300 text-green-700
+                                 px-3 py-2 rounded-lg hover:bg-green-50 transition-colors whitespace-nowrap">
+                      <FaFileExcel /> Download Template
+                    </button>
+                  </div>
+                  {file && (
+                    <p className="text-xs text-green-600 mt-1 flex items-center gap-1">
+                      <FaCheckCircle /> {file.name}
+                    </p>
+                  )}
+                  <p className="text-xs text-gray-400 mt-1">
+                    Excel must include: subject_code, subject_name, type, hours_per_week, faculty_1,
+                    branch, year, semester, section. Optional: faculty_2, lab_consecutive_periods,
+                    lab_split_mode, min_faculty_gap.
+                  </p>
+                </div>
+              </div>
+
+              {/* Config summary badge */}
+              <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 text-xs text-gray-600 flex flex-wrap gap-x-4 gap-y-1">
+                <span><b>College:</b> {config.college_name}</span>
+                <span><b>Days:</b> {config.working_days} | <b>Periods/day:</b> {config.periods_per_day}</span>
+                <span><b>Lab default:</b> {config.lab_consecutive_periods} periods</span>
+                <span><b>Faculty gap default:</b> {config.min_faculty_gap || 1} period(s)</span>
+                <span className="text-blue-500 italic">Branch / Year / Sem / Sections — from Excel</span>
+              </div>
+
+              {error && (
+                <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 px-4 py-3 rounded-lg whitespace-pre-wrap">
+                  <FaExclamationTriangle className="mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              {!result && (
+                <div className="flex gap-3">
+                  <button onClick={handleGenerate} disabled={loading || !file}
+                    className="flex items-center gap-2 bg-blue-600 text-white px-8 py-2.5 rounded-lg
+                               hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed
+                               transition-colors font-medium">
+                    {loading
+                      ? <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        </svg> Generating…</>
+                      : <><FaTable /> Generate Timetable</>}
+                  </button>
+                </div>
+              )}
+
+              {result && (
+                <div className="space-y-4">
+
+                  {/* AI Summary */}
+                  {result.ai_summary && (
+                    <div className="flex gap-3 bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                      <FaRobot className="text-indigo-500 text-xl shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs font-bold text-indigo-700 mb-1">AI Summary (Qwen 2.5)</p>
+                        <p className="text-sm text-indigo-900 leading-relaxed">{result.ai_summary}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Groups summary */}
+                  {result.groups?.length > 0 && (
+                    <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-xs text-green-800 flex flex-wrap gap-x-4 gap-y-1">
+                      {result.groups.map((g, i) => (
+                        <span key={i}>
+                          <b>{g.branch}</b> Y{g.year}S{g.semester} — Sections: {g.sections.join(', ')}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Success banner */}
+                  <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
+                    <FaCheckCircle className="text-green-500 text-lg shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold text-green-800">
+                        Timetable generated for {result.sections?.length} section(s):&nbsp;
+                        {result.sections?.map(s => result.section_meta?.[s]?.label || s).join(', ')}
+                      </p>
+                      <p className="text-xs text-green-600 mt-0.5">Select format and section below, then download.</p>
+                    </div>
+                  </div>
+
+                  {/* Download controls */}
+                  <div className="bg-white border border-gray-200 rounded-xl p-4">
+                    <p className="text-sm font-semibold text-gray-700 mb-3">Download Options</p>
+                    <div className="flex flex-wrap gap-4 items-end">
+                      <div>
+                        <FieldLabel>Format</FieldLabel>
+                        <select value={downloadFormat} onChange={e => setDownloadFormat(e.target.value)}
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+                          <option value="pdf">PDF (one file per section)</option>
+                          <option value="excel">Excel (all sections)</option>
+                        </select>
+                      </div>
+
+                      {downloadFormat === 'pdf' && (
+                        <div>
+                          <FieldLabel>Section</FieldLabel>
+                          <select value={downloadSection} onChange={e => setDownloadSection(e.target.value)}
+                            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+                            {result.sections?.map(s => (
+                              <option key={s} value={s}>{result.section_meta?.[s]?.label || ('Section ' + s)}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      <button onClick={handleDownload} disabled={downloading}
+                        className="flex items-center gap-2 bg-blue-600 text-white px-6 py-2 rounded-lg
+                                   hover:bg-blue-700 disabled:bg-gray-400 transition-colors font-medium text-sm">
+                        {downloading
+                          ? 'Downloading…'
+                          : <><FaDownload /> Download {downloadFormat === 'pdf' ? <FaFilePdf /> : <FaFileExcel />}</>}
+                      </button>
+
+                      <button onClick={handleDownloadAll} disabled={downloadingAll}
+                        className="flex items-center gap-2 bg-green-600 text-white px-6 py-2 rounded-lg
+                                   hover:bg-green-700 disabled:bg-gray-400 transition-colors font-medium text-sm">
+                        {downloadingAll ? 'Downloading…' : <><FaDownload /> Download All Sections (PDF)</>}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Faculty Timetable Downloads */}
+                  {result.faculty_list?.length > 0 && (
+                    <div className="bg-white border border-indigo-200 rounded-xl p-4">
+                      <p className="text-sm font-semibold text-gray-700 mb-1 flex items-center gap-2">
+                        <FaUserTie className="text-indigo-500" /> Faculty Timetables
+                      </p>
+                      <p className="text-xs text-gray-400 mb-3">
+                        Individual timetable per faculty showing their sections and subjects.
+                      </p>
+                      <div className="flex flex-wrap gap-4 items-end">
+                        <div>
+                          <FieldLabel>Faculty</FieldLabel>
+                          <select value={downloadFaculty} onChange={e => setDownloadFaculty(e.target.value)}
+                            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                            {result.faculty_list.map(f => (
+                              <option key={f} value={f}>{f}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <button onClick={handleDownloadFaculty} disabled={downloadingFaculty || !downloadFaculty}
+                          className="flex items-center gap-2 bg-indigo-600 text-white px-5 py-2 rounded-lg
+                                     hover:bg-indigo-700 disabled:bg-gray-400 transition-colors font-medium text-sm">
+                          {downloadingFaculty ? 'Downloading…' : <><FaDownload /> <FaFilePdf /> Faculty PDF</>}
+                        </button>
+                        <button onClick={handleDownloadFacultyAll} disabled={downloadingFacultyAll}
+                          className="flex items-center gap-2 bg-purple-600 text-white px-5 py-2 rounded-lg
+                                     hover:bg-purple-700 disabled:bg-gray-400 transition-colors font-medium text-sm">
+                          {downloadingFacultyAll ? 'Downloading…' : <><FaDownload /> All Faculty (PDF)</> }
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Regenerate */}
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => { setResult(null); setFile(null); setError(''); }}
+                      className="text-sm text-gray-500 border border-gray-300 px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                      Generate New Timetable
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

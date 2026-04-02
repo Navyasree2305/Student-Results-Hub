@@ -1,0 +1,194 @@
+@startuml SPMVV_Exam_Results_Architecture
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+skinparam component {
+  BackgroundColor #E8F4FD
+  BorderColor #2196F3
+}
+skinparam database {
+  BackgroundColor #FFF3E0
+  BorderColor #FF9800
+}
+skinparam cloud {
+  BackgroundColor #F3E5F5
+  BorderColor #9C27B0
+}
+
+title SPMVV Exam Results - Application Architecture
+
+actor "Browser\n(User)" as Browser
+
+node "Docker Host (VM: 10.127.248.83)" {
+
+  package "spmvv_frontend\n[Docker Container :2026]" {
+    component "Vite Dev Server\n(React 18)" as ViteServer
+
+    package "Pages" {
+      component "Login" as PageLogin
+      component "Register" as PageRegister
+      component "AdminDashboard" as PageAdmin
+      component "StudentDashboard" as PageStudent
+      component "UserManagement" as PageUsers
+      component "CircularManagement" as PageCirculars
+      component "HallTicketPage" as PageHallTicket
+      component "StudentCirculars" as PageStudentCirculars
+    }
+
+    package "Components" {
+      component "AuthContext\n(JWT state)" as AuthCtx
+      component "ProtectedRoute\n(Role guard)" as ProtRoute
+      component "Navbar" as Navbar
+      component "NotificationBell" as NotifBell
+      component "HallTicketManagement" as HallTicketComp
+      component "StudentHallTicketView" as StudentHTView
+      component "PhotoUpload" as PhotoComp
+    }
+
+    package "Services (API Clients)" {
+      component "api.js\n(axios instance)" as AxiosBase
+      component "authService" as AuthSvc
+      component "resultsService" as ResultsSvc
+      component "notificationService" as NotifSvc
+      component "circularService" as CircularSvc
+      component "hallTicketService" as HallTicketSvc
+      component "profileService" as ProfileSvc
+    }
+
+    package "Utils" {
+      component "tokenManager\n(JWT storage)" as TokenMgr
+      component "validation" as Validation
+    }
+  }
+
+  package "spmvv_backend\n[Docker Container :8000]" {
+    component "Gunicorn WSGI\n(4 workers)" as Gunicorn
+
+    package "Django Middleware Stack" {
+      component "SecurityHeadersMiddleware\n(CSP, XSS, Clickjack)" as SecMW
+      component "CorsMiddleware\n(django-cors-headers)" as CorsMW
+      component "MediaCORSMiddleware\n(media/* CORS)" as MediaMW
+      component "LoginAttemptMiddleware\n(brute force guard)" as LoginMW
+      component "WhitenoiseMiddleware\n(static files)" as WhiteNoise
+    }
+
+    package "URL Router" {
+      component "/api/* -> results.urls" as Router
+    }
+
+    package "Views (DRF)" {
+      component "views.py\n(Auth, Results, Users,\nCirculars, Stats)" as Views
+      component "hall_ticket_views.py\n(Exam, Enrollment,\nHall Ticket, Photo)" as HTViews
+      component "student_management.py\n(Student search,\nHistory, Marks)" as StudentViews
+    }
+
+    package "Business Logic" {
+      component "excel_handler.py\n(openpyxl parse)" as ExcelHandler
+      component "hall_ticket_generator.py\n(generate + QR)" as HTGenerator
+      component "hall_ticket_pdf.py\n(reportlab PDF)" as HTPdf
+    }
+
+    package "Auth & Security" {
+      component "SimpleJWT\n(Bearer token)" as JWT
+      component "JWT Blacklist\n(token revocation)" as JWTBlacklist
+      component "django-ratelimit\n(rate limiting)" as RateLimit
+    }
+
+    package "Django Models (ORM)" {
+      component "User\n(AbstractUser + roles\n+ permissions)" as ModelUser
+      component "Result\n(exam result record)" as ModelResult
+      component "Subject\n(per-subject marks)" as ModelSubject
+      component "AuditLog\n(action tracking)" as ModelAudit
+      component "Notification\n(student alerts)" as ModelNotif
+      component "LoginAttempt\n(login tracking)" as ModelLogin
+      component "BlacklistedToken\n(JWT revocation)" as ModelToken
+      component "Circular\n(announcements)" as ModelCircular
+      component "Exam\n(hall ticket exam)" as ModelExam
+      component "ExamSubject\n(exam schedule)" as ModelExamSubj
+      component "ExamEnrollment\n(student enrolled)" as ModelEnroll
+      component "StudentPhoto\n(profile photo)" as ModelPhoto
+      component "HallTicket\n(generated ticket)" as ModelHT
+    }
+  }
+
+  package "spmvv_db\n[Docker Container :3306]" {
+    database "MySQL 8\nspmvv_results" as MySQL
+  }
+
+  cloud "Docker Network\nspmvv_network" as DockerNet
+}
+
+Browser --> ViteServer : HTTP :2026
+
+ViteServer --> PageLogin
+ViteServer --> PageAdmin
+ViteServer --> PageStudent
+ViteServer --> PageHallTicket
+
+PageAdmin --> AuthCtx
+PageStudent --> AuthCtx
+AuthCtx --> TokenMgr
+
+PageAdmin --> ResultsSvc
+PageAdmin --> NotifSvc
+PageAdmin --> CircularSvc
+PageAdmin --> HallTicketSvc
+PageStudent --> ResultsSvc
+PageStudent --> NotifSvc
+
+AuthSvc --> AxiosBase
+ResultsSvc --> AxiosBase
+NotifSvc --> AxiosBase
+CircularSvc --> AxiosBase
+HallTicketSvc --> AxiosBase
+ProfileSvc --> AxiosBase
+
+AxiosBase --> Gunicorn : HTTP REST\n(Bearer JWT)\n:8000/api/*
+
+Gunicorn --> CorsMW
+CorsMW --> SecMW
+SecMW --> LoginMW
+LoginMW --> Router
+
+Router --> Views
+Router --> HTViews
+Router --> StudentViews
+
+Views --> JWT
+Views --> RateLimit
+Views --> ExcelHandler
+Views --> ModelUser
+Views --> ModelResult
+Views --> ModelSubject
+Views --> ModelAudit
+Views --> ModelNotif
+Views --> ModelLogin
+Views --> ModelToken
+Views --> ModelCircular
+
+HTViews --> HTGenerator
+HTViews --> HTPdf
+HTViews --> ModelExam
+HTViews --> ModelExamSubj
+HTViews --> ModelEnroll
+HTViews --> ModelPhoto
+HTViews --> ModelHT
+
+StudentViews --> ModelUser
+StudentViews --> ModelResult
+StudentViews --> ModelSubject
+
+JWT --> JWTBlacklist
+JWTBlacklist --> ModelToken
+
+ModelUser --> MySQL : Django ORM
+ModelResult --> MySQL
+ModelSubject --> MySQL
+ModelAudit --> MySQL
+ModelNotif --> MySQL
+ModelCircular --> MySQL
+ModelExam --> MySQL
+ModelEnroll --> MySQL
+ModelHT --> MySQL
+
+@enduml

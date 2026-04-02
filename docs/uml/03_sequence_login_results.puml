@@ -1,0 +1,94 @@
+@startuml SPMVV_Sequence_Login_Results
+
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam sequenceParticipant underline
+skinparam ParticipantBackgroundColor #E8F4FD
+skinparam ParticipantBorderColor #2196F3
+skinparam ActorBackgroundColor #FFF3E0
+skinparam ActorBorderColor #FF9800
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #FFC107
+
+title SPMVV Exam Results - Login & Result View Sequence
+
+actor Student
+participant "React Frontend\n:2026" as FE
+participant "Gunicorn/Django\n:8000" as BE
+participant "LoginAttemptMW" as MW
+participant "SimpleJWT" as JWT
+database "MySQL" as DB
+
+== Authentication ==
+
+Student -> FE: Enter credentials\n(username + password)
+FE -> BE: POST /api/login/\n{username, password}
+BE -> MW: check_login_attempts(username, ip)
+MW -> DB: Query User.locked_until\n+ failed_login_attempts
+DB --> MW: User record
+
+alt Account is locked
+  MW --> BE: Account locked
+  BE --> FE: 423 { error: "Account locked", minutes_remaining }
+  FE --> Student: Show lock countdown message
+else Too many recent attempts
+  MW --> BE: Rate limit exceeded
+  BE --> FE: 429 Too Many Requests
+  FE --> Student: Show retry message
+else Attempts OK
+  BE -> DB: Authenticate credentials
+  DB --> BE: User record (valid)
+  BE -> JWT: Issue access token (60 min)\n+ refresh token (1440 min)
+  JWT --> BE: { access, refresh }
+  BE -> DB: INSERT LoginAttempt (success=True)
+  BE -> DB: UPDATE User: failed_login_attempts=0, locked_until=NULL
+  BE -> DB: INSERT AuditLog (action=login, ip)
+  BE --> FE: 200 {\n  access, refresh,\n  role, permissions,\n  username\n}
+  FE -> FE: tokenManager.store(access, refresh)
+  FE -> FE: AuthContext.setUser(role, permissions)
+
+  alt role == "student"
+    FE --> Student: Navigate to /student/dashboard
+  else role == "admin" / staff
+    FE --> Student: Navigate to /admin/dashboard
+  end
+end
+
+== Viewing Exam Results (Student) ==
+
+Student -> FE: Open Results tab
+FE -> BE: GET /api/results/\nAuthorization: Bearer <access_token>
+BE -> JWT: Validate token signature + expiry
+JWT -> DB: SELECT * FROM blacklisted_tokens\nWHERE token = <token>
+DB --> JWT: Not found (token valid)
+JWT --> BE: Token OK, user=Student (id, role)
+BE -> DB: SELECT results, subjects\nWHERE roll_number = student.roll_number
+DB --> BE: Result rows + Subject rows
+BE -> DB: INSERT AuditLog (action=result_view)
+BE --> FE: 200 { results: [ { year, semester,\n  subjects, sgpa, overall_grade } ] }
+FE --> Student: Render results table + semester summary
+
+== Token Refresh ==
+
+FE -> FE: Detect access token expiring
+FE -> BE: POST /api/token/refresh/\n{ refresh: <refresh_token> }
+BE -> JWT: Validate refresh token
+JWT -> DB: Check blacklist
+DB --> JWT: Valid
+JWT --> BE: New access + refresh tokens\n(ROTATE_REFRESH_TOKENS=True)
+BE -> DB: Blacklist old refresh token
+BE --> FE: 200 { access, refresh }
+FE -> FE: tokenManager.update(new tokens)
+
+== Logout ==
+
+Student -> FE: Click Logout
+FE -> BE: POST /api/logout/\nAuthorization: Bearer <access_token>
+BE -> DB: INSERT BlacklistedToken (access + refresh)
+BE -> DB: INSERT AuditLog (action=logout)
+BE --> FE: 200 { message: "Logged out" }
+FE -> FE: tokenManager.clear()
+FE -> FE: AuthContext.reset()
+FE --> Student: Navigate to /login
+
+@enduml
